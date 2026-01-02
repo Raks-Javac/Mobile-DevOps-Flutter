@@ -1,75 +1,240 @@
-name: Flutter CI/CD
+name: Deploy to Google Play Internal Testing
 
 on:
   push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+    branches:
+      - main
+  workflow_dispatch: # Allows manual triggering
 
 env:
   PROJECT_DIRECTORY: "azure_githubaction_flutter_app"
-  JAVA_VERSION: "17"
-  FLUTTER_CHANNEL: "stable"
 
 jobs:
-  build_apk:
-    name: Build Android APK
+  deploy:
+    name: Build and Deploy to Internal Testing
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to commit version updates back to repo
 
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup Java
-        uses: actions/setup-java@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          distribution: "zulu"
-          java-version: ${{ env.JAVA_VERSION }}
+          fetch-depth: 0 # Fetch all history for proper versioning
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
           cache: "gradle"
 
-      - name: Setup Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: ${{ env.FLUTTER_CHANNEL }}
+          flutter-version: "3.38.1"
+          channel: "stable"
           cache: true
 
-      - name: Install Dependencies
+      - name: Get Flutter dependencies
         run: |
           cd ${{ env.PROJECT_DIRECTORY }}
           flutter pub get
 
-      - name: Analyze
-        run: |
-          cd ${{ env.PROJECT_DIRECTORY }}
-          flutter analyze
+      - name: Verify Flutter installation
+        run: flutter doctor -v
 
-      - name: Run Tests
+      - name: Verify Java Version
         run: |
-          cd ${{ env.PROJECT_DIRECTORY }}
-          flutter test
+          java -version
+          echo "JAVA_HOME: $JAVA_HOME"
+          javac -version
 
-      # Setup Keystore for Signing (Requires Configuration)
-      # You need to:
-      # 1. Base64 encode your keystore: openssl base64 < my-upload-key.jks | tr -d '\n' | pbcopy
-      # 2. Add KEYSTORE_BASE64 to GitHub Secrets
-      # 3. Add KEY_PROPERTIES (storePassword, keyPassword, keyAlias, storeFile) logic or secrets.
-      #
-      # - name: Decode Keystore
+      - name: Override Gradle Java Home (for CI/CD)
+        run: |
+          # Remove any hardcoded Java home from gradle.properties to use GitHub Actions JDK
+          # Checking inside the project directory
+          if [ -f "${{ env.PROJECT_DIRECTORY }}/android/gradle.properties" ]; then
+            sed -i '/^org\.gradle\.java\.home=/d' ${{ env.PROJECT_DIRECTORY }}/android/gradle.properties
+            echo "✅ Removed local Java home setting - will use GitHub Actions JDK"
+          else
+             echo "⚠️ gradle.properties not found at ${{ env.PROJECT_DIRECTORY }}/android/gradle.properties, skipping modification."
+          fi
+          echo "JAVA_HOME from environment: $JAVA_HOME"
+
+      - name: Increment Build Number
+        run: |
+          # Read current version from pubspec.yaml
+          PUBSPEC_PATH="${{ env.PROJECT_DIRECTORY }}/pubspec.yaml"
+
+          if [ ! -f "$PUBSPEC_PATH" ]; then
+            echo "Error: pubspec.yaml not found at $PUBSPEC_PATH"
+            exit 1
+          fi
+
+          CURRENT_VERSION=$(grep "^version:" "$PUBSPEC_PATH" | sed 's/version: //' | xargs)
+
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "Error: Could not find version in pubspec.yaml"
+            exit 1
+          fi
+
+          echo "Current version: $CURRENT_VERSION"
+
+          # Validate version format (should be x.y.z+buildNumber)
+          if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+$ ]]; then
+            echo "Error: Invalid version format. Expected format: x.y.z+buildNumber"
+            echo "Found: $CURRENT_VERSION"
+            exit 1
+          fi
+
+          # Extract version name and build number
+          VERSION_NAME=$(echo $CURRENT_VERSION | cut -d'+' -f1)
+          BUILD_NUMBER=$(echo $CURRENT_VERSION | cut -d'+' -f2)
+
+          # Validate build number is numeric
+          if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Error: Build number is not numeric: $BUILD_NUMBER"
+            exit 1
+          fi
+
+          # Increment build number
+          NEW_BUILD_NUMBER=$((BUILD_NUMBER + 1))
+          NEW_VERSION="$VERSION_NAME+$NEW_BUILD_NUMBER"
+
+          echo "New version: $NEW_VERSION"
+          echo "BUILD_NUMBER=$NEW_BUILD_NUMBER" >> $GITHUB_ENV
+          echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+
+          # Update pubspec.yaml (works on Linux/Ubuntu)
+          sed -i "s/^version: .*/version: $NEW_VERSION/" "$PUBSPEC_PATH"
+
+          # Verify the update
+          UPDATED_VERSION=$(grep "^version:" "$PUBSPEC_PATH" | sed 's/version: //' | xargs)
+          if [ "$UPDATED_VERSION" != "$NEW_VERSION" ]; then
+            echo "Error: Failed to update version in pubspec.yaml"
+            echo "Expected: $NEW_VERSION"
+            echo "Found: $UPDATED_VERSION"
+            exit 1
+          fi
+
+          echo "✅ Successfully updated pubspec.yaml:"
+          grep "^version:" "$PUBSPEC_PATH"
+
+      - name: Commit Version Update
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add "${{ env.PROJECT_DIRECTORY }}/pubspec.yaml"
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            COMMIT_MSG="chore: bump build number to ${{ env.NEW_VERSION }} [skip ci]
+
+          - Build number incremented from previous version
+          - Auto-generated by GitHub Actions workflow
+          - Triggered by: ${{ github.event.head_commit.message || 'manual trigger' }}"
+            git commit -m "$COMMIT_MSG"
+            git push origin HEAD:${{ github.ref }}
+            echo "✅ Version updated and pushed successfully"
+          fi
+
+      # - name: Setup Keystore
+      #   if: ${{ secrets.KEYSTORE_BASE64 != '' }}
       #   run: |
-      #     echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
-      #     # Create key.properties if not checking it in (recommended)
-      #     echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" > android/key.properties
-      #     echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> android/key.properties
-      #     echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> android/key.properties
-      #     echo "storeFile=upload-keystore.jks" >> android/key.properties
-      #   working-directory: ${{ env.PROJECT_DIRECTORY }}
+      #     echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > ${{ env.PROJECT_DIRECTORY }}/android/app/nexvenue-release-key.jks
+      #     echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" > ${{ env.PROJECT_DIRECTORY }}/android/key.properties
+      #     echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> ${{ env.PROJECT_DIRECTORY }}/android/key.properties
+      #     echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> ${{ env.PROJECT_DIRECTORY }}/android/key.properties
+      #     echo "storeFile=app/nexvenue-release-key.jks" >> ${{ env.PROJECT_DIRECTORY }}/android/key.properties
 
-      - name: Build APK (Release)
+      # - name: Setup Google Maps API Key
+      #   if: ${{ secrets.GOOGLE_MAPS_API_KEY != '' }}
+      #   run: |
+      #     echo "google.maps.api.key=${{ secrets.GOOGLE_MAPS_API_KEY }}" >> ${{ env.PROJECT_DIRECTORY }}/android/local.properties
+
+      # - name: Setup Google Service Account
+      #   if: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON != '' }}
+      #   run: |
+      #     mkdir -p ${{ env.PROJECT_DIRECTORY }}/project_keys
+      #     echo "${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}" > ${{ env.PROJECT_DIRECTORY }}/project_keys/service_account.json
+
+      - name: Build App Bundle
         run: |
           cd ${{ env.PROJECT_DIRECTORY }}
-          flutter build apk --release
+          echo "Building with version: ${{ env.NEW_VERSION }}"
+          echo "Version name: ${{ env.VERSION_NAME }}"
+          echo "Build number: ${{ env.BUILD_NUMBER }}"
+          flutter build appbundle --release --build-number=${{ env.BUILD_NUMBER }} --build-name=${{ env.VERSION_NAME }}
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v3
+      - name: Verify App Bundle
+        run: |
+          AAB_PATH="${{ env.PROJECT_DIRECTORY }}/build/app/outputs/bundle/release/app-release.aab"
+          if [ ! -f "$AAB_PATH" ]; then
+            echo "❌ Error: App bundle not found at $AAB_PATH"
+            exit 1
+          fi
+
+          AAB_SIZE=$(du -h "$AAB_PATH" | cut -f1)
+          echo "✅ App bundle created successfully"
+          echo "📦 Bundle size: $AAB_SIZE"
+          echo "📦 Bundle path: $AAB_PATH"
+
+          # Verify bundle is not empty
+          if [ ! -s "$AAB_PATH" ]; then
+            echo "❌ Error: App bundle is empty"
+            exit 1
+          fi
+
+      # - name: Upload to Google Play Internal Testing
+      #   if: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON != '' }}
+      #   uses: r0adkll/upload-google-play@v1
+      #   with:
+      #     serviceAccountJsonPlainText: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      #     packageName: com.nexvenue.app
+      #     releaseFiles: ${{ env.PROJECT_DIRECTORY }}/build/app/outputs/bundle/release/app-release.aab
+      #     track: internal
+      #     status: completed
+      #     inAppUpdatePriority: 2
+      #   continue-on-error: false
+      #   env:
+      #     GOOGLE_PLAY_PACKAGE_NAME: com.nexvenue.app
+
+      - name: Upload APK Artifact (optional)
+        uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: ${{ env.PROJECT_DIRECTORY }}/build/app/outputs/flutter-apk/app-release.apk
+          name: app-release
+          path: |
+            ${{ env.PROJECT_DIRECTORY }}/build/app/outputs/bundle/release/app-release.aab
+            ${{ env.PROJECT_DIRECTORY }}/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Successfully deployed to Google Play Internal Testing**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ env.NEW_VERSION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version Name | \`${{ env.VERSION_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build Number | \`${{ env.BUILD_NUMBER }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Track | Internal Testing |" >> $GITHUB_STEP_SUMMARY
+          echo "| Package Name | \`com.nexvenue.app\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 App bundle is available in the workflow artifacts." >> $GITHUB_STEP_SUMMARY
+
+      # - name: Cleanup sensitive files
+      #   if: always()
+      #   run: |
+      #     echo "🧹 Cleaning up sensitive files..."
+      #     rm -f ${{ env.PROJECT_DIRECTORY }}/android/app/nexvenue-release-key.jks
+      #     rm -f ${{ env.PROJECT_DIRECTORY }}/android/key.properties
+      #     rm -f ${{ env.PROJECT_DIRECTORY }}/project_keys/service_account.json
+      #     rm -f ${{ env.PROJECT_DIRECTORY }}/android/local.properties
+      #     echo "✅ Cleanup completed"

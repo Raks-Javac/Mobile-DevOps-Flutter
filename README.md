@@ -47,18 +47,29 @@ Visit `http://localhost:8080` to see your app running.
 
 The GitHub Actions workflow is defined in `.github/workflows/flutter-ci.yml`. It triggers on push and pull requests to the `main` branch.
 
+### GitHub Actions
+
+The GitHub Actions workflow is defined in `.github/workflows/flutter-ci.yml`. It triggers on push to the `main` branch.
+
 ### Features
 
-- **Linting & Testing**: Runs `flutter analyze` and `flutter test`.
-- **Android Build**: Builds an APK (`flutter-apk`) and uploads it as an artifact.
-- **Docker Build**: Builds the Docker image and pushes it to Docker Hub (configuration required).
+- **Automated Versioning**: Automatically increments the build number in `pubspec.yaml` and commits the change back to the repository.
+- **Java & Flutter Setup**: Uses Java 17 and Flutter 3.38.1 (Stable).
+- **Environment Consistency**: Ensures Gradle uses the CI-provisioned JDK.
+- **Build**: Builds an Android App Bundle (`.aab`) for release.
+- **Artifacts**: Uploads the generated `.aab` and `.apk` as workflow artifacts.
+- **Google Play Upload (Configured)**: Contains steps to upload to Google Play Internal Testing (requires setup).
 
 ### Setup Secrets
 
-To enable Docker Hub pushing, go to **Settings > Secrets and variables > Actions** in your GitHub repository and add:
+To enable signing and Google Play deployment, go to **Settings > Secrets and variables > Actions** in your GitHub repository and add:
 
-- `DOCKERHUB_USERNAME`: Your Docker Hub username.
-- `DOCKERHUB_TOKEN`: Your Docker Hub access token.
+- `KEYSTORE_BASE64`: Base64 encoded Java Keystore file.
+- `KEYSTORE_PASSWORD`: Password for the Keystore.
+- `KEY_PASSWORD`: Password for the Key alias.
+- `KEY_ALIAS`: Alias of the key.
+- `GOOGLE_SERVICE_ACCOUNT_JSON`: JSON content of your Google Play Service Account key.
+- `GOOGLE_MAPS_API_KEY`: API Key for Google Maps (if used).
 
 ---
 
