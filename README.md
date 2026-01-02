@@ -1,4 +1,4 @@
-# Azure & GitHub Actions CI/CD Guide for Flutter
+# Mobile-DevOps-Flutter
 
 This repository serves as a comprehensive guide and template for implementing CI/CD pipelines for a Flutter application using both **Azure DevOps** and **GitHub Actions**. It also includes **Docker** support for containerizing the Flutter Web application.
 
@@ -91,4 +91,3 @@ The Azure Pipeline is defined in `azure-pipelines.yml`.
 | **Docker Build**  | &#9989; Yes                        | &#9989; Yes                        |
 
 Feel free to modify the YAML files to suit your specific deployment needs, such as adding deployment steps to App Center, Play Store, or Azure Web Apps.
-# Mobile-DevOps-Flutter
