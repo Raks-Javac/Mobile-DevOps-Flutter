@@ -1,0 +1,88 @@
+trigger:
+  - main
+
+pr:
+  - main
+
+variables:
+  # Adjust this to your flutter project directory name
+  projectDirectory: "azure_githubaction_flutter_app"
+  vmImageName: "ubuntu-latest"
+  dockerRegistry: "my-docker-registry" # Replace with your registry connection name
+  dockerRepository: "my-flutter-app"
+  tag: "$(Build.BuildId)"
+
+pool:
+  vmImage: $(vmImageName)
+
+stages:
+  - stage: BuildApp
+    displayName: Build Flutter App
+    jobs:
+      - job: Android
+        displayName: Build Android APK
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: FlutterInstall@0
+            inputs:
+              mode: "auto"
+              channel: "stable"
+              version: "latest"
+
+          - script: |
+              cd $(projectDirectory)
+              flutter pub get
+              flutter build apk --release
+            displayName: "Flutter Build APK"
+
+          - task: CopyFiles@2
+            displayName: "Copy APK to Staging"
+            inputs:
+              SourceFolder: "$(projectDirectory)/build/app/outputs/flutter-apk"
+              Contents: "**/*.apk"
+              TargetFolder: "$(Build.ArtifactStagingDirectory)"
+
+          - task: PublishBuildArtifacts@1
+            displayName: "Publish APK Artifact"
+            inputs:
+              PathtoPublish: "$(Build.ArtifactStagingDirectory)"
+              ArtifactName: "drop-android"
+              publishLocation: "Container"
+
+    # Uncomment the following job if you have a Mac agent to build iOS
+    # - job: iOS
+    #   displayName: Build iOS IPA
+    #   pool:
+    #     vmImage: 'macOS-latest'
+    #   steps:
+    #   - task: FlutterInstall@0
+    #     inputs:
+    #       mode: 'auto'
+    #       channel: 'stable'
+    #       version: 'latest'
+    #   - script: |
+    #       cd $(projectDirectory)
+    #       flutter pub get
+    #       flutter build ios --release --no-codesign
+    #     displayName: 'Flutter Build iOS'
+
+  - stage: BuildDocker
+    displayName: Build and Push Docker Image
+    dependsOn: BuildApp
+    jobs:
+      - job: Docker
+        displayName: Docker Build & Push
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: Docker@2
+            displayName: Build and Push Docker Image
+            inputs:
+              command: buildAndPush
+              repository: $(dockerRepository)
+              dockerfile: "Dockerfile" # Assumes Dockerfile is in root
+              containerRegistry: $(dockerRegistry)
+              tags: |
+                $(tag)
+                latest
