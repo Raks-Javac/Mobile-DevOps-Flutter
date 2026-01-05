@@ -13,7 +13,7 @@ jobs:
     name: Build and Deploy to Internal Testing
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Required to commit version updates back to repo
+      contents: write # Required to commit version 
 
     steps:
       - name: Checkout repository
