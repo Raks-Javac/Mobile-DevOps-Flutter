@@ -1,88 +1,166 @@
 trigger:
   - main
 
-pr:
-  - main
+pool:
+  vmImage: "ubuntu-latest"
 
 variables:
-  # Adjust this to your flutter project directory name
   projectDirectory: "azure_githubaction_flutter_app"
-  vmImageName: "ubuntu-latest"
-  dockerRegistry: "my-docker-registry" # Replace with your registry connection name
-  dockerRepository: "my-flutter-app"
-  tag: "$(Build.BuildId)"
 
-pool:
-  vmImage: $(vmImageName)
+steps:
+  - checkout: self
+    persistCredentials: true # Required to push changes back to the repo
+    fetchDepth: 0 # Fetch all history for proper versioning
 
-stages:
-  - stage: BuildApp
-    displayName: Build Flutter App
-    jobs:
-      - job: Android
-        displayName: Build Android APK
-        pool:
-          vmImage: "ubuntu-latest"
-        steps:
-          - task: FlutterInstall@0
-            inputs:
-              mode: "auto"
-              channel: "stable"
-              version: "latest"
+  - task: JavaToolInstaller@0
+    inputs:
+      versionSpec: "17"
+      jdkArchitectureOption: "x64"
+      jdkSourceOption: "PreInstalled"
+    displayName: "Set up Java 17"
 
-          - script: |
-              cd $(projectDirectory)
-              flutter pub get
-              flutter build apk --release
-            displayName: "Flutter Build APK"
+  - task: FlutterInstall@0
+    inputs:
+      mode: "auto"
+      channel: "stable"
+      version: "custom"
+      customVersion: "3.38.1" # Matches the version used in GitHub Actions
+    displayName: "Set up Flutter"
 
-          - task: CopyFiles@2
-            displayName: "Copy APK to Staging"
-            inputs:
-              SourceFolder: "$(projectDirectory)/build/app/outputs/flutter-apk"
-              Contents: "**/*.apk"
-              TargetFolder: "$(Build.ArtifactStagingDirectory)"
+  - script: |
+      cd $(projectDirectory)
+      flutter pub get
+    displayName: "Get Flutter dependencies"
 
-          - task: PublishBuildArtifacts@1
-            displayName: "Publish APK Artifact"
-            inputs:
-              PathtoPublish: "$(Build.ArtifactStagingDirectory)"
-              ArtifactName: "drop-android"
-              publishLocation: "Container"
+  - script: flutter doctor -v
+    displayName: "Verify Flutter installation"
 
-    # Uncomment the following job if you have a Mac agent to build iOS
-    # - job: iOS
-    #   displayName: Build iOS IPA
-    #   pool:
-    #     vmImage: 'macOS-latest'
-    #   steps:
-    #   - task: FlutterInstall@0
-    #     inputs:
-    #       mode: 'auto'
-    #       channel: 'stable'
-    #       version: 'latest'
-    #   - script: |
-    #       cd $(projectDirectory)
-    #       flutter pub get
-    #       flutter build ios --release --no-codesign
-    #     displayName: 'Flutter Build iOS'
+  - script: |
+      java -version
+      javac -version
+      echo "JAVA_HOME: $JAVA_HOME"
+    displayName: "Verify Java Version"
 
-  - stage: BuildDocker
-    displayName: Build and Push Docker Image
-    dependsOn: BuildApp
-    jobs:
-      - job: Docker
-        displayName: Docker Build & Push
-        pool:
-          vmImage: "ubuntu-latest"
-        steps:
-          - task: Docker@2
-            displayName: Build and Push Docker Image
-            inputs:
-              command: buildAndPush
-              repository: $(dockerRepository)
-              dockerfile: "Dockerfile" # Assumes Dockerfile is in root
-              containerRegistry: $(dockerRegistry)
-              tags: |
-                $(tag)
-                latest
+  - script: |
+      # Remove any hardcoded Java home from gradle.properties to use Azure Pipelines JDK
+      if [ -f "$(projectDirectory)/android/gradle.properties" ]; then
+        sed -i '/^org\.gradle\.java\.home=/d' $(projectDirectory)/android/gradle.properties
+        echo "✅ Removed local Java home setting - will use Pipeline JDK"
+      else
+        echo "⚠️ gradle.properties not found, skipping modification."
+      fi
+    displayName: "Override Gradle Java Home"
+
+  - script: |
+      # Read current version from pubspec.yaml
+      PUBSPEC_PATH="$(projectDirectory)/pubspec.yaml"
+
+      if [ ! -f "$PUBSPEC_PATH" ]; then
+        echo "Error: pubspec.yaml not found at $PUBSPEC_PATH"
+        exit 1
+      fi
+
+      CURRENT_VERSION=$(grep "^version:" "$PUBSPEC_PATH" | sed 's/version: //' | xargs)
+
+      if [ -z "$CURRENT_VERSION" ]; then
+        echo "Error: Could not find version in pubspec.yaml"
+        exit 1
+      fi
+
+      echo "Current version: $CURRENT_VERSION"
+
+      # Validate version format (should be x.y.z+buildNumber)
+      if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+[0-9]+$ ]]; then
+        echo "Error: Invalid version format. Expected format: x.y.z+buildNumber"
+        echo "Found: $CURRENT_VERSION"
+        exit 1
+      fi
+
+      # Extract version name and build number
+      VERSION_NAME=$(echo $CURRENT_VERSION | cut -d'+' -f1)
+      BUILD_NUMBER=$(echo $CURRENT_VERSION | cut -d'+' -f2)
+
+      # Validate build number is numeric
+      if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+        echo "Error: Build number is not numeric: $BUILD_NUMBER"
+        exit 1
+      fi
+
+      # Increment build number
+      NEW_BUILD_NUMBER=$((BUILD_NUMBER + 1))
+      NEW_VERSION="$VERSION_NAME+$NEW_BUILD_NUMBER"
+
+      echo "New version: $NEW_VERSION"
+
+      # Set variables for subsequent steps
+      echo "##vso[task.setvariable variable=BUILD_NUMBER]$NEW_BUILD_NUMBER"
+      echo "##vso[task.setvariable variable=NEW_VERSION]$NEW_VERSION"
+      echo "##vso[task.setvariable variable=VERSION_NAME]$VERSION_NAME"
+
+      # Update pubspec.yaml
+      sed -i "s/^version: .*/version: $NEW_VERSION/" "$PUBSPEC_PATH"
+
+      # Verify the update
+      UPDATED_VERSION=$(grep "^version:" "$PUBSPEC_PATH" | sed 's/version: //' | xargs)
+      if [ "$UPDATED_VERSION" != "$NEW_VERSION" ]; then
+        echo "Error: Failed to update version in pubspec.yaml"
+        echo "Expected: $NEW_VERSION"
+        echo "Found: $UPDATED_VERSION"
+        exit 1
+      fi
+      echo "✅ Successfully updated pubspec.yaml"
+    displayName: "Increment Build Number"
+
+  - script: |
+      git config --global user.email "azure-pipelines[bot]@dev.azure.com"
+      git config --global user.name "azure-pipelines[bot]"
+      git add "$(projectDirectory)/pubspec.yaml"
+
+      if git diff --staged --quiet; then
+        echo "No changes to commit"
+      else
+        COMMIT_MSG="chore: bump build number to $(NEW_VERSION) [skip ci]
+        
+        - Build number incremented from previous version
+        - Auto-generated by Azure Pipelines
+        - Triggered by: $(Build.SourceVersionMessage)"
+        
+        git commit -m "$COMMIT_MSG"
+        # Push to the branch that triggered the build
+        git push origin HEAD:$(Build.SourceBranch)
+        echo "✅ Version updated and pushed successfully"
+      fi
+    displayName: "Commit Version Update"
+
+  - script: |
+      cd $(projectDirectory)
+      echo "Building with version: $(NEW_VERSION)"
+      echo "Version name: $(VERSION_NAME)"
+      echo "Build number: $(BUILD_NUMBER)"
+      flutter build appbundle --release --build-number=$(BUILD_NUMBER) --build-name=$(VERSION_NAME)
+    displayName: "Build App Bundle"
+
+  - script: |
+      AAB_PATH="$(projectDirectory)/build/app/outputs/bundle/release/app-release.aab"
+      if [ ! -f "$AAB_PATH" ]; then
+        echo "❌ Error: App bundle not found at $AAB_PATH"
+        exit 1
+      fi
+
+      AAB_SIZE=$(du -h "$AAB_PATH" | cut -f1)
+      echo "✅ App bundle created successfully"
+      echo "📦 Bundle size: $AAB_SIZE"
+      echo "📦 Bundle path: $AAB_PATH"
+
+      if [ ! -s "$AAB_PATH" ]; then
+        echo "❌ Error: App bundle is empty"
+        exit 1
+      fi
+    displayName: "Verify App Bundle"
+
+  - task: PublishBuildArtifacts@1
+    inputs:
+      PathtoPublish: "$(projectDirectory)/build/app/outputs/bundle/release/app-release.aab"
+      ArtifactName: "app-release"
+      publishLocation: "Container"
+    displayName: "Upload App Bundle Artifact"
