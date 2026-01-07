@@ -69,7 +69,6 @@ To enable signing and Google Play deployment, go to **Settings > Secrets and var
 - `KEY_PASSWORD`: Password for the Key alias.
 - `KEY_ALIAS`: Alias of the key.
 - `GOOGLE_SERVICE_ACCOUNT_JSON`: JSON content of your Google Play Service Account key.
-- `GOOGLE_MAPS_API_KEY`: API Key for Google Maps (if used).
 
 ---
 
